@@ -1,69 +1,88 @@
-// make.fun news-image-20261122 bounty entry
+// make.fun bounty entry: news-image-20261122
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-const IHDR_TAG = Buffer.from("IHDR", "ascii");
-const MAX_BYTES = 1_048_576;
-const REQUIRED_WIDTH = 1024;
-const REQUIRED_HEIGHT = 1024;
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const IHDR_CHUNK = Buffer.from("IHDR", "ascii");
+const MAX_ENTRY_BYTES = 1_048_576;
+const TARGET_WIDTH = 1024;
+const TARGET_HEIGHT = 1024;
 
-function readAndVerifyEntryPng(sourcePath: string): Buffer {
-  const data = readFileSync(sourcePath);
+interface VerifiedPng {
+  bytes: Buffer;
+  width: number;
+  height: number;
+}
 
-  if (data.byteLength > MAX_BYTES) {
+function loadAndVerifyPng(entryPath: string): VerifiedPng {
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(entryPath);
+  } catch (err: unknown) {
+    if (err !== null && typeof err === "object" && "code" in err && err.code === "ENOENT") {
+      throw new Error(`Missing required file: entry.png was not found at ${entryPath}`);
+    }
+    throw err;
+  }
+
+  if (bytes.byteLength > MAX_ENTRY_BYTES) {
     throw new Error(
-      `entry.png exceeds maximum size of ${MAX_BYTES} bytes (got ${data.byteLength} bytes)`
+      `entry.png exceeds the ${MAX_ENTRY_BYTES}-byte limit (got ${bytes.byteLength} bytes)`
     );
   }
 
-  if (data.byteLength < PNG_SIGNATURE.byteLength || !data.subarray(0, 8).equals(PNG_SIGNATURE)) {
-    throw new Error("entry.png does not have a valid 8-byte PNG signature");
+  if (bytes.byteLength < PNG_MAGIC.byteLength || !bytes.subarray(0, 8).equals(PNG_MAGIC)) {
+    throw new Error("entry.png failed PNG verification: invalid 8-byte signature");
   }
 
   if (
-    data.byteLength < 24 ||
-    data.readUInt32BE(8) !== 13 ||
-    !data.subarray(12, 16).equals(IHDR_TAG)
+    bytes.byteLength < 24 ||
+    bytes.readUInt32BE(8) !== 13 ||
+    !bytes.subarray(12, 16).equals(IHDR_CHUNK)
   ) {
-    throw new Error("entry.png does not start with a valid PNG IHDR chunk");
+    throw new Error("entry.png failed PNG verification: missing or malformed IHDR chunk");
   }
 
-  const width = data.readUInt32BE(16);
-  const height = data.readUInt32BE(20);
+  const width = bytes.readUInt32BE(16);
+  const height = bytes.readUInt32BE(20);
 
-  if (width !== REQUIRED_WIDTH || height !== REQUIRED_HEIGHT) {
+  if (width !== TARGET_WIDTH || height !== TARGET_HEIGHT) {
     throw new Error(
-      `entry.png must be ${REQUIRED_WIDTH}x${REQUIRED_HEIGHT} pixels (got ${width}x${height})`
+      `entry.png dimensions must be ${TARGET_WIDTH}x${TARGET_HEIGHT} (got ${width}x${height})`
     );
   }
 
-  return data;
+  return { bytes, width, height };
 }
 
-function main(): void {
-  const moduleDir = dirname(fileURLToPath(import.meta.url));
-  const sourcePath = join(moduleDir, "entry.png");
-  const pngData = readAndVerifyEntryPng(sourcePath);
-
-  const envOutputDir = process.env.MAKEFUN_OUTPUT_DIR;
-  if (envOutputDir === "") {
-    throw new Error("MAKEFUN_OUTPUT_DIR must not be an empty string");
+function resolveOutputDir(): string {
+  const configured = process.env.MAKEFUN_OUTPUT_DIR;
+  if (configured === "") {
+    throw new Error("MAKEFUN_OUTPUT_DIR is set to an empty string; provide a valid directory path");
   }
-  const outputDir = envOutputDir ?? "/output";
-  mkdirSync(outputDir, { recursive: true });
+  return configured ?? "/output";
+}
 
-  const destinationPath = join(outputDir, "entry.png");
-  writeFileSync(destinationPath, pngData);
+function run(): void {
+  const baseDir = dirname(fileURLToPath(import.meta.url));
+  const sourceFile = join(baseDir, "entry.png");
+  const verified = loadAndVerifyPng(sourceFile);
 
-  console.log(`Wrote ${destinationPath} (${pngData.byteLength} bytes)`);
+  const outDir = resolveOutputDir();
+  mkdirSync(outDir, { recursive: true });
+
+  const targetFile = join(outDir, "entry.png");
+  writeFileSync(targetFile, verified.bytes);
+
+  console.log(`Copied ${targetFile} (${verified.bytes.byteLength} bytes)`);
+  console.log(`Verified PNG dimensions: ${verified.width}x${verified.height}`);
 }
 
 try {
-  main();
-} catch (error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(`Error: ${message}`);
+  run();
+} catch (err: unknown) {
+  const detail = err instanceof Error ? err.message : String(err);
+  console.error(`Error: ${detail}`);
   process.exitCode = 1;
 }
